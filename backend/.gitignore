@@ -1,7 +1,9 @@
 node_modules/
 .env
-test-keys/
 ai-env/
 test-keys/
 ai/identity_model.joblib
-.env
+
+config/*.db
+config/*.db-shm
+config/*.db-wal
