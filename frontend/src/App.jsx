@@ -929,6 +929,25 @@ function App() {
                       ? " · Anomaly detected"
                       : ""}
                   </small>
+                  {verificationResult.ai?.explanation && (
+                    <p className="ai-explanation">
+                      {verificationResult.ai.explanation}
+                    </p>
+                  )}
+                  {verificationResult.ai?.indicators && (
+                    <small className="ai-indicators">
+                      Failed verifications:{" "}
+                      {verificationResult.ai.indicators.failedVerifications ?? 0}
+                      {" · "}Recent failures:{" "}
+                      {verificationResult.ai.indicators.recentFailedVerifications ?? 0}
+                      {" · "}Additional IPs:{" "}
+                      {verificationResult.ai.indicators.additionalIPs ?? 0}
+                      {" · "}ML anomaly:{" "}
+                      {verificationResult.ai.indicators.machineLearningAnomaly
+                        ? "Detected"
+                        : "Not detected"}
+                    </small>
+                  )}
                 </div>
               </div>
 

@@ -28,7 +28,8 @@ const {
     createAuthenticationEvent,
     getIdentityActivityStats,
     getAuthenticationEvents,
-    getIdentityAuthenticationEvents
+    getIdentityAuthenticationEvents,
+    getRecentFailedVerifications
 } = require("../models/authenticationEventModel");
 
 const {
@@ -324,6 +325,7 @@ const verifyIdentity = async (req, res) => {
         const activity = {
             verificationAttempts: stats.verificationAttempts,
             failedVerifications: stats.failedVerifications,
+            recentFailedVerifications: stats.recentFailedVerifications || 0,
             registrations: 1,
             uniqueIPs: stats.uniqueIPs
         };
@@ -383,7 +385,11 @@ const verifyIdentity = async (req, res) => {
                 anomaly: ai.anomaly,
                 riskScore: ai.riskScore,
                 status: ai.status,
-                mlAnomaly: ai.mlAnomaly
+                mlAnomaly: ai.mlAnomaly,
+                burstRisk: ai.burstRisk,
+                recentFailedVerifications: ai.recentFailedVerifications,
+                explanation: ai.explanation,
+                indicators: ai.indicators
             },
             securityDecision: decision.securityDecision,
             accessGranted: decision.accessGranted
@@ -638,9 +644,13 @@ const getIdentityActivity = async (req, res) => {
             50
         );
 
+        const recentFailedVerifications =
+            getRecentFailedVerifications(identityId, 15);
+
         const activity = {
             verificationAttempts: stats.verificationAttempts,
             failedVerifications: stats.failedVerifications,
+            recentFailedVerifications,
             registrations: 1,
             uniqueIPs: stats.uniqueIPs
         };
@@ -656,7 +666,14 @@ const getIdentityActivity = async (req, res) => {
                 anomaly: ai.anomaly,
                 riskScore: ai.riskScore,
                 status: ai.status,
-                mlAnomaly: ai.mlAnomaly
+                mlAnomaly: ai.mlAnomaly,
+                securityRisk: ai.securityRisk,
+                failureRisk: ai.failureRisk,
+                ipRisk: ai.ipRisk,
+                burstRisk: ai.burstRisk,
+                recentFailedVerifications,
+                explanation: ai.explanation,
+                indicators: ai.indicators
             },
             securityDecision: decision.securityDecision,
             accessGranted: decision.accessGranted
