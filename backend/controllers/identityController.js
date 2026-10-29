@@ -549,7 +549,10 @@ const analyzeIdentityActivity = async (req, res) => {
                     !Number.isInteger(value)
             ) ||
             activity.failedVerifications >
-                activity.verificationAttempts
+                activity.verificationAttempts ||
+            activity.registrations > activity.verificationAttempts ||
+            activity.failedVerifications > 0 &&
+                activity.verificationAttempts === 0
         ) {
             return res.status(400).json({
                 message:
