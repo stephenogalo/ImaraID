@@ -1,10 +1,13 @@
+
 const crypto = require("crypto");
 
 const {
     createIdentity,
     getAllIdentities,
     getIdentityByPublicKey,
-    getIdentityById
+    getIdentityById,
+    updateIdentity: updateIdentityRecord,
+    setIdentityActive
 } = require("../models/identityModel");
 
 const {
@@ -15,7 +18,10 @@ const {
 
 const {
     createIdentityHash,
-    registerIdentityOnBlockchain
+    registerIdentityOnBlockchain,
+    verifyIdentityOnBlockchain,
+    getIdentityOnBlockchain,
+    deactivateIdentityOnBlockchain
 } = require("../services/blockchainService");
 
 const {
@@ -29,34 +35,69 @@ const {
     analyzeActivity
 } = require("../services/aiService");
 
+// One consistent AI decision policy for all relevant endpoints.
+const decideAccess = (ai) => {
+    const status = String(ai?.status || "").toUpperCase();
 
-// --------------------------------------------------
+    if (status === "NORMAL") {
+        return {
+            securityDecision: "VERIFIED_NORMAL",
+            accessGranted: true
+        };
+    }
+
+    if (status === "SUSPICIOUS") {
+        return {
+            securityDecision: "SUSPICIOUS_REVIEW",
+            accessGranted: false
+        };
+    }
+
+    if (status === "HIGH_RISK") {
+        return {
+            securityDecision: "HIGH_RISK_BLOCKED",
+            accessGranted: false
+        };
+    }
+
+    // Fail closed if AI output is missing or unrecognized.
+    return {
+        securityDecision: "AI_DECISION_UNAVAILABLE",
+        accessGranted: false
+    };
+};
+
+const publicIdentity = (identity) => ({
+    id: identity.id,
+    name: identity.name,
+    email: identity.email,
+    did: identity.did,
+    active: Boolean(Number(identity.active ?? 1))
+});
+
 // REGISTER IDENTITY
-// --------------------------------------------------
-
 const registerIdentity = async (req, res) => {
     try {
         const { name, email } = req.body;
 
-        if (!name || !email) {
+        if (
+            typeof name !== "string" ||
+            !name.trim() ||
+            typeof email !== "string" ||
+            !email.trim()
+        ) {
             return res.status(400).json({
                 message: "Name and email are required"
             });
         }
 
-        // Generate Ed25519 key pair
         const keys = await generateKeyPair();
-
-        // Create DID from public key
         const did = createDID(keys.publicKey);
-
-        // Create blockchain identity hash
         const identityHash = createIdentityHash(
             did,
             keys.publicKey
         );
 
-        // Register identity on blockchain
         const blockchainResult =
             await registerIdentityOnBlockchain(
                 identityHash,
@@ -64,277 +105,416 @@ const registerIdentity = async (req, res) => {
                 keys.publicKey
             );
 
-        // Store BOTH public and private keys
         const identity = createIdentity(
-            name,
-            email,
+            name.trim(),
+            email.trim(),
             did,
             keys.publicKey,
             keys.privateKey
+        );
+
+        createAuthenticationEvent(
+            identity.id, true, req.ip, "IDENTITY_REGISTERED"
         );
 
         return res.status(201).json({
             message: "Identity registered successfully",
             identity,
             blockchain: {
-                transactionHash:
-                    blockchainResult.transactionHash,
-                blockNumber:
-                    blockchainResult.blockNumber,
-                identityHash
+                transactionHash: blockchainResult.transactionHash,
+                blockNumber: blockchainResult.blockNumber,
+                identityHash,
+                contractAddress:
+                    process.env.IDENTITY_REGISTRY_ADDRESS
             }
         });
-
     } catch (error) {
-
-        if (
-            error.code === "SQLITE_CONSTRAINT_UNIQUE"
-        ) {
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
             return res.status(409).json({
                 message:
                     "An identity with this email already exists"
             });
         }
 
-        console.error(
-            "Identity registration error:",
-            error
-        );
+        console.error("Identity registration error:", error);
 
         return res.status(500).json({
-            message:
-                "Failed to register identity",
-            error:
-                error.message
+            message: "Failed to register identity",
+            error: error.message
         });
     }
 };
 
-
-// --------------------------------------------------
 // GET ALL IDENTITIES
-// --------------------------------------------------
-
 const getIdentities = (req, res) => {
     try {
-        const identities = getAllIdentities();
-
         return res.json({
-            identities
+            identities: getAllIdentities()
         });
-
     } catch (error) {
-
-        console.error(
-            "Get identities error:",
-            error
-        );
+        console.error("Get identities error:", error);
 
         return res.status(500).json({
-            message:
-                "Failed to retrieve identities"
+            message: "Failed to retrieve identities"
         });
     }
 };
 
-
-// --------------------------------------------------
-// VERIFY IDENTITY
-// --------------------------------------------------
-
+// VERIFY IDENTITY USING CRYPTOGRAPHY, BLOCKCHAIN AND AI
 const verifyIdentity = async (req, res) => {
+    let identityId = null;
+    let ipAddress = "unknown";
+    let eventRecorded = false;
+
     try {
+        const { data, signature, publicKey } = req.body;
 
-        const {
-            data,
-            signature,
-            publicKey
-        } = req.body;
-
-        if (!data || !signature || !publicKey) {
+        if (
+            typeof data !== "string" ||
+            typeof signature !== "string" ||
+            typeof publicKey !== "string" ||
+            !data ||
+            !signature ||
+            !publicKey
+        ) {
             return res.status(400).json({
+                verified: false,
+                accessGranted: false,
                 message:
                     "Data, signature and publicKey are required"
             });
         }
 
-        // Find identity by public key
-        const identity =
-            getIdentityByPublicKey(publicKey);
-
-        // Verify cryptographic signature
-        const verified =
-            verifySignature(
-                data,
-                signature,
-                publicKey
-            );
-
-        // Get requester IP
-        const ipAddress =
+        ipAddress =
             req.ip ||
             req.socket?.remoteAddress ||
             "unknown";
 
-        const identityId =
-            identity ? identity.id : null;
+        const identity = getIdentityByPublicKey(publicKey);
 
-        // Record authentication event
-        createAuthenticationEvent(
-            identityId,
-            verified,
-            ipAddress
-        );
-
-        // Public key not registered
+        // Unknown identities are never eligible for access.
         if (!identity) {
+            createAuthenticationEvent(
+                null,
+                false,
+                ipAddress
+            );
+            eventRecorded = true;
+
             return res.status(404).json({
-                verified,
+                verified: false,
                 identity: null,
+                blockchain: {
+                    verified: false,
+                    active: false
+                },
                 ai: null,
-                securityDecision:
-                    "UNKNOWN_IDENTITY",
+                securityDecision: "UNKNOWN_IDENTITY",
                 accessGranted: false,
                 message:
-                    verified
-                        ? "Cryptographic verification succeeded, but the public key is not registered in the identity system"
-                        : "Identity verification failed because the public key is not registered"
+                    "The public key is not registered in ImaraID"
             });
         }
 
-        // Invalid signature
-        if (!verified) {
+        identityId = identity.id;
+
+        if (!Boolean(Number(identity.active ?? 1))) {
+            createAuthenticationEvent(identity.id, false, ipAddress);
+            eventRecorded = true;
+
+            return res.status(403).json({
+                verified: false,
+                identity: publicIdentity(identity),
+                blockchain: {
+                    verified: false,
+                    active: false
+                },
+                securityDecision: "IDENTITY_REVOKED",
+                accessGranted: false,
+                code: "IDENTITY_REVOKED",
+                message: "This identity has been revoked."
+            });
+        }
+
+        // Reject invalid signatures before consulting the AI.
+        const signatureVerified = verifySignature(
+            data,
+            signature,
+            publicKey
+        );
+
+        if (!signatureVerified) {
+            createAuthenticationEvent(
+                identity.id,
+                false,
+                ipAddress
+            );
+            eventRecorded = true;
+
             return res.status(401).json({
                 verified: false,
-                identity: {
-                    id: identity.id,
-                    name: identity.name,
-                    email: identity.email,
-                    did: identity.did
+                identity: publicIdentity(identity),
+                blockchain: null,
+                ai: null,
+                securityDecision: "INVALID_SIGNATURE",
+                accessGranted: false,
+                message:
+                    "Digital signature verification failed"
+            });
+        }
+
+        const identityHash = createIdentityHash(
+            identity.did,
+            identity.publicKey
+        );
+
+        let blockchainVerified = false;
+        let blockchainIdentity = null;
+
+        try {
+            blockchainVerified =
+                await verifyIdentityOnBlockchain(identityHash);
+
+            if (blockchainVerified) {
+                blockchainIdentity =
+                    await getIdentityOnBlockchain(identityHash);
+
+                blockchainVerified =
+                    blockchainIdentity?.active === true &&
+                    typeof blockchainIdentity.identityHash === "string" &&
+                    blockchainIdentity.identityHash.toLowerCase() ===
+                        identityHash.toLowerCase() &&
+                    blockchainIdentity.did === identity.did &&
+                    blockchainIdentity.publicKey === identity.publicKey;
+            }
+        } catch (blockchainError) {
+            console.error(
+                "Blockchain verification error:",
+                blockchainError.message
+            );
+        }
+
+        // Blockchain failure always denies access, irrespective of AI.
+        if (!blockchainVerified) {
+            createAuthenticationEvent(
+                identity.id,
+                false,
+                ipAddress
+            );
+            eventRecorded = true;
+
+            return res.status(403).json({
+                verified: false,
+                identity: publicIdentity(identity),
+                blockchain: {
+                    verified: false,
+                    active: false
                 },
                 ai: null,
                 securityDecision:
-                    "INVALID_SIGNATURE",
+                    "BLOCKCHAIN_VERIFICATION_FAILED",
                 accessGranted: false,
                 message:
-                    "Identity verification failed"
+                    "Access denied: the identity could not be confirmed as active on the blockchain"
             });
         }
 
-        // Get identity activity
-        const stats =
-            getIdentityActivityStats(
-                identity.id
-            );
+        const stats = getIdentityActivityStats(identity.id);
 
         const activity = {
-            verificationAttempts:
-                stats.verificationAttempts,
-
-            failedVerifications:
-                stats.failedVerifications,
-
-            registrations:
-                1,
-
-            uniqueIPs:
-                stats.uniqueIPs
+            verificationAttempts: stats.verificationAttempts,
+            failedVerifications: stats.failedVerifications,
+            registrations: 1,
+            uniqueIPs: stats.uniqueIPs
         };
 
-        // AI risk analysis
-        const ai =
-            await analyzeActivity(activity);
+        let ai;
 
-        let securityDecision;
-        let accessGranted;
+        try {
+            ai = await analyzeActivity(activity);
+        } catch (aiError) {
+            console.error("AI analysis failed:", aiError.message);
 
-        if (ai.status === "HIGH_RISK") {
+            createAuthenticationEvent(
+                identity.id,
+                false,
+                ipAddress
+            );
+            eventRecorded = true;
 
-            securityDecision =
-                "HIGH_RISK_BLOCKED";
-
-            accessGranted = false;
-
-        } else if (ai.status === "SUSPICIOUS") {
-
-            securityDecision =
-                "SUSPICIOUS_REVIEW";
-
-            accessGranted = false;
-
-        } else {
-
-            securityDecision =
-                "VERIFIED_NORMAL";
-
-            accessGranted = true;
+            return res.status(503).json({
+                verified: true,
+                identity: publicIdentity(identity),
+                blockchain: {
+                    verified: true,
+                    active: true,
+                    identityHash,
+                    contractAddress:
+                        process.env.IDENTITY_REGISTRY_ADDRESS
+                },
+                ai: null,
+                securityDecision: "AI_DECISION_UNAVAILABLE",
+                accessGranted: false,
+                message:
+                    "Access denied: security risk analysis is unavailable"
+            });
         }
+
+        const decision = decideAccess(ai);
+
+        createAuthenticationEvent(
+            identity.id,
+            decision.accessGranted,
+            ipAddress
+        );
+        eventRecorded = true;
 
         const response = {
             verified: true,
-
-            identity: {
-                id: identity.id,
-                name: identity.name,
-                email: identity.email,
-                did: identity.did
+            identity: publicIdentity(identity),
+            blockchain: {
+                verified: true,
+                active: true,
+                identityHash,
+                contractAddress:
+                    process.env.IDENTITY_REGISTRY_ADDRESS
             },
-
             ai: {
                 anomaly: ai.anomaly,
                 riskScore: ai.riskScore,
-                status: ai.status
+                status: ai.status,
+                mlAnomaly: ai.mlAnomaly
             },
-
-            securityDecision,
-
-            accessGranted
+            securityDecision: decision.securityDecision,
+            accessGranted: decision.accessGranted
         };
 
-        if (!accessGranted) {
-
+        if (!decision.accessGranted) {
             return res.status(403).json({
                 ...response,
-
                 message:
-                    ai.status === "HIGH_RISK"
-                        ? "Identity verified cryptographically, but access has been blocked because the AI detected high-risk activity"
-                        : "Identity verified cryptographically, but access requires security review because the AI detected suspicious activity"
+                    "Cryptographic and blockchain checks passed, but AI risk analysis denied access"
             });
         }
 
         return res.json({
             ...response,
-
             message:
-                "Identity verified successfully"
+                "Identity verified successfully by cryptography, blockchain and AI risk analysis"
         });
-
     } catch (error) {
+        console.error("Identity verification error:", error);
 
-        console.error(
-            "Identity verification error:",
-            error
-        );
+        if (!eventRecorded && identityId !== null) {
+            try {
+                createAuthenticationEvent(
+                    identityId,
+                    false,
+                    ipAddress
+                );
+            } catch (eventError) {
+                console.error(
+                    "Failed to record authentication event:",
+                    eventError.message
+                );
+            }
+        }
 
         return res.status(500).json({
-            message:
-                "Failed to verify identity",
-
-            error:
-                error.message
+            verified: false,
+            identity: null,
+            blockchain: null,
+            ai: null,
+            securityDecision: "VERIFICATION_ERROR",
+            accessGranted: false,
+            message: "Failed to verify identity",
+            error: error.message
         });
     }
 };
 
+// VERIFY A REGISTERED IDENTITY BY ID
+const verifyRegisteredIdentity = async (req, res) => {
+    try {
+        const identityId = Number(req.params.id);
 
-// --------------------------------------------------
+        if (
+            !Number.isInteger(identityId) ||
+            identityId <= 0
+        ) {
+            return res.status(400).json({
+                verified: false,
+                accessGranted: false,
+                message: "Valid identity ID is required"
+            });
+        }
+
+        const identity = getIdentityById(identityId);
+
+        if (!identity) {
+            return res.status(404).json({
+                verified: false,
+                identity: null,
+                ai: null,
+                securityDecision: "UNKNOWN_IDENTITY",
+                accessGranted: false,
+                message: "Identity not found"
+            });
+        }
+
+        if (!identity.privateKey || !identity.publicKey) {
+            return res.status(409).json({
+                verified: false,
+                identity: publicIdentity(identity),
+                ai: null,
+                securityDecision: "KEYS_UNAVAILABLE",
+                accessGranted: false,
+                message:
+                    "This stored identity does not have the keys required for verification"
+            });
+        }
+
+        const data = JSON.stringify({
+            id: identity.id,
+            name: identity.name,
+            email: identity.email,
+            did: identity.did
+        });
+
+        const signature = crypto.sign(
+            null,
+            Buffer.from(data),
+            identity.privateKey
+        ).toString("base64");
+
+        req.body = {
+            data,
+            signature,
+            publicKey: identity.publicKey
+        };
+
+        return await verifyIdentity(req, res);
+    } catch (error) {
+        console.error(
+            "Registered identity verification error:",
+            error
+        );
+
+        return res.status(500).json({
+            verified: false,
+            identity: null,
+            ai: null,
+            securityDecision: "VERIFICATION_ERROR",
+            accessGranted: false,
+            message:
+                "An error occurred during identity verification"
+        });
+    }
+};
+
 // ANALYZE IDENTITY ACTIVITY
-// --------------------------------------------------
-
 const analyzeIdentityActivity = async (req, res) => {
     try {
-
         const {
             verificationAttempts,
             failedVerifications,
@@ -355,98 +535,65 @@ const analyzeIdentityActivity = async (req, res) => {
         }
 
         const activity = {
-            verificationAttempts:
-                Number(verificationAttempts),
-
-            failedVerifications:
-                Number(failedVerifications),
-
-            registrations:
-                Number(registrations),
-
-            uniqueIPs:
-                Number(uniqueIPs)
+            verificationAttempts: Number(verificationAttempts),
+            failedVerifications: Number(failedVerifications),
+            registrations: Number(registrations),
+            uniqueIPs: Number(uniqueIPs)
         };
 
         if (
             Object.values(activity).some(
                 value =>
                     !Number.isFinite(value) ||
-                    value < 0
-            )
+                    value < 0 ||
+                    !Number.isInteger(value)
+            ) ||
+            activity.failedVerifications >
+                activity.verificationAttempts
         ) {
             return res.status(400).json({
                 message:
-                    "Activity values must be valid non-negative numbers"
+                    "Activity values must be non-negative integers, and failed verifications cannot exceed total attempts"
             });
         }
 
-        const aiResult =
-            await analyzeActivity(activity);
+        const ai = await analyzeActivity(activity);
+        const decision = decideAccess(ai);
 
         return res.json({
-            message:
-                "Identity activity analyzed successfully",
-
+            message: "Identity activity analyzed successfully",
             activity,
-
-            ai:
-                aiResult
+            ai,
+            securityDecision: decision.securityDecision,
+            accessGranted: decision.accessGranted
         });
-
     } catch (error) {
-
-        console.error(
-            "AI analysis error:",
-            error
-        );
+        console.error("AI analysis error:", error);
 
         return res.status(500).json({
-            message:
-                "Failed to analyze identity activity",
-
-            error:
-                error.message
+            message: "Failed to analyze identity activity",
+            error: error.message
         });
     }
 };
 
-
-// --------------------------------------------------
 // GET AUTHENTICATION EVENT HISTORY
-// --------------------------------------------------
-
-const getAuthenticationEventHistory = (
-    req,
-    res
-) => {
-
+const getAuthenticationEventHistory = (req, res) => {
     try {
+        const requestedLimit = Number(req.query.limit) || 50;
 
-        const requestedLimit =
-            Number(req.query.limit) || 50;
+        const limit = Math.min(
+            Math.max(Math.floor(requestedLimit), 1),
+            100
+        );
 
-        const limit =
-            Math.min(
-                Math.max(
-                    Math.floor(requestedLimit),
-                    1
-                ),
-                100
-            );
-
-        const events =
-            getAuthenticationEvents(limit);
+        const events = getAuthenticationEvents(limit);
 
         return res.json({
-            count:
-                events.length,
-
+            count: events.length,
             events
         });
-
     } catch (error) {
-
         console.error(
             "Authentication event history error:",
             error
@@ -459,350 +606,210 @@ const getAuthenticationEventHistory = (
     }
 };
 
-
-// --------------------------------------------------
 // GET IDENTITY ACTIVITY
-// --------------------------------------------------
-
-const getIdentityActivity = async (
-    req,
-    res
-) => {
-
+const getIdentityActivity = async (req, res) => {
     try {
-
-        const identityId =
-            Number(req.params.id);
+        const identityId = Number(req.params.id);
 
         if (
             !Number.isInteger(identityId) ||
             identityId <= 0
         ) {
             return res.status(400).json({
-                message:
-                    "Invalid identity ID"
+                message: "Invalid identity ID"
             });
         }
 
-        const identity =
-            getAllIdentities().find(
-                item =>
-                    Number(item.id) === identityId
-            );
+        const identity = getIdentityById(identityId);
 
         if (!identity) {
             return res.status(404).json({
-                message:
-                    "Identity not found"
+                message: "Identity not found"
             });
         }
 
-        const stats =
-            getIdentityActivityStats(
-                identityId
-            );
+        const stats = getIdentityActivityStats(identityId);
 
-        const events =
-            getIdentityAuthenticationEvents(
-                identityId,
-                50
-            );
+        const events = getIdentityAuthenticationEvents(
+            identityId,
+            50
+        );
 
         const activity = {
-
-            verificationAttempts:
-                stats.verificationAttempts,
-
-            failedVerifications:
-                stats.failedVerifications,
-
-            registrations:
-                1,
-
-            uniqueIPs:
-                stats.uniqueIPs
+            verificationAttempts: stats.verificationAttempts,
+            failedVerifications: stats.failedVerifications,
+            registrations: 1,
+            uniqueIPs: stats.uniqueIPs
         };
 
-        const ai =
-            await analyzeActivity(activity);
+        const ai = await analyzeActivity(activity);
+        const decision = decideAccess(ai);
 
-        let securityDecision;
-        let accessGranted;
+        return res.json({
+            identity: publicIdentity(identity),
+            stats,
+            events,
+            ai: {
+                anomaly: ai.anomaly,
+                riskScore: ai.riskScore,
+                status: ai.status,
+                mlAnomaly: ai.mlAnomaly
+            },
+            securityDecision: decision.securityDecision,
+            accessGranted: decision.accessGranted
+        });
+    } catch (error) {
+        console.error("Identity activity error:", error);
 
-        if (ai.status === "HIGH_RISK") {
+        return res.status(500).json({
+            message: "Failed to retrieve identity activity",
+            error: error.message
+        });
+    }
+};
 
-            securityDecision =
-                "HIGH_RISK_BLOCKED";
 
-            accessGranted = false;
+// EDIT IDENTITY: only name and email can be changed.
+const updateIdentity = (req, res) => {
+    try {
+        const identityId = Number(req.params.id);
+        const { name, email } = req.body || {};
 
-        } else if (ai.status === "SUSPICIOUS") {
+        if (!Number.isInteger(identityId) || identityId <= 0) {
+            return res.status(400).json({ message: "Invalid identity ID" });
+        }
 
-            securityDecision =
-                "SUSPICIOUS_REVIEW";
+        if (
+            typeof name !== "string" || !name.trim() ||
+            typeof email !== "string" || !email.trim()
+        ) {
+            return res.status(400).json({
+                message: "A valid name and email are required"
+            });
+        }
 
-            accessGranted = false;
+        const existing = getIdentityById(identityId);
 
-        } else {
+        if (!existing) {
+            return res.status(404).json({ message: "Identity not found" });
+        }
 
-            securityDecision =
-                "VERIFIED_NORMAL";
+        if (!Boolean(Number(existing.active ?? 1))) {
+            return res.status(409).json({
+                message: "A revoked identity cannot be edited"
+            });
+        }
 
-            accessGranted = true;
+        const updated = updateIdentityRecord(
+            identityId,
+            name.trim(),
+            email.trim()
+        );
+
+        if (!updated) {
+            return res.status(409).json({
+                message: "Identity could not be updated"
+            });
+        }
+
+        createAuthenticationEvent(
+            identityId, true, req.ip, "IDENTITY_UPDATED"
+        );
+
+        return res.json({
+            message: "Identity updated successfully",
+            identity: publicIdentity(updated)
+        });
+    } catch (error) {
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+            return res.status(409).json({
+                message: "That email address is already registered"
+            });
+        }
+
+        console.error("Identity update error:", error);
+        return res.status(500).json({
+            message: "Failed to update identity"
+        });
+    }
+};
+
+// REVOKE IDENTITY: deactivate on-chain and preserve the local record.
+const revokeIdentity = async (req, res) => {
+    try {
+        const identityId = Number(req.params.id);
+
+        if (!Number.isInteger(identityId) || identityId <= 0) {
+            return res.status(400).json({ message: "Invalid identity ID" });
+        }
+
+        const identity = getIdentityById(identityId);
+
+        if (!identity) {
+            return res.status(404).json({ message: "Identity not found" });
+        }
+
+        if (!Boolean(Number(identity.active ?? 1))) {
+            return res.status(409).json({
+                message: "This identity has already been revoked",
+                identity: publicIdentity(identity)
+            });
+        }
+
+        const identityHash = createIdentityHash(
+            identity.did,
+            identity.publicKey
+        );
+
+        const chainIdentity = await getIdentityOnBlockchain(identityHash);
+
+        if (
+            !chainIdentity.active ||
+            String(chainIdentity.identityHash).toLowerCase() !==
+                identityHash.toLowerCase() ||
+            chainIdentity.did !== identity.did ||
+            chainIdentity.publicKey !== identity.publicKey
+        ) {
+            return res.status(409).json({
+                message: "The on-chain identity does not match an active registered identity. No changes were made."
+            });
+        }
+
+        const transaction = await deactivateIdentityOnBlockchain(identityHash);
+        const updated = setIdentityActive(identityId, false);
+
+        if (!updated) {
+            return res.status(500).json({
+                message: "The blockchain identity was revoked, but the local record could not be updated. Reconcile the database status before continuing."
+            });
         }
 
         return res.json({
-
-            identity: {
-                id: identity.id,
-                name: identity.name,
-                email: identity.email,
-                did: identity.did
-            },
-
-            stats,
-
-            events,
-
-            ai: {
-                anomaly:
-                    ai.anomaly,
-
-                riskScore:
-                    ai.riskScore,
-
-                status:
-                    ai.status
-            },
-
-            securityDecision,
-
-            accessGranted
+            message: "Identity revoked successfully",
+            identity: publicIdentity(updated),
+            blockchain: {
+                active: false,
+                transactionHash: transaction.transactionHash,
+                blockNumber: transaction.blockNumber
+            }
         });
-
     } catch (error) {
-
-        console.error(
-            "Identity activity error:",
-            error
-        );
-
+        console.error("Identity revocation error:", error);
         return res.status(500).json({
-            message:
-                "Failed to retrieve identity activity",
-
-            error:
-                error.message
+            message: "Failed to revoke identity",
+            error: error.message
         });
     }
 };
-
-
-// --------------------------------------------------
-// VERIFY REGISTERED IDENTITY
-// --------------------------------------------------
-
-const verifyRegisteredIdentity = async (
-    req,
-    res
-) => {
-
-    try {
-
-        const identityId =
-            Number(req.params.id);
-
-        if (
-            !Number.isInteger(identityId) ||
-            identityId <= 0
-        ) {
-            return res.status(400).json({
-                message:
-                    "Valid identity ID is required"
-            });
-        }
-
-        /*
-         * IMPORTANT:
-         * getAllIdentities() intentionally does not
-         * return private keys.
-         *
-         * Therefore we use getIdentityById()
-         * which returns the private key.
-         */
-        const identity =
-            getIdentityById(identityId);
-
-        if (!identity) {
-            return res.status(404).json({
-
-                verified: false,
-
-                identity: null,
-
-                ai: null,
-
-                securityDecision:
-                    "UNKNOWN_IDENTITY",
-
-                accessGranted:
-                    false,
-
-                message:
-                    "Identity not found"
-            });
-        }
-
-        if (!identity.privateKey) {
-
-            return res.status(500).json({
-
-                verified: false,
-
-                identity: {
-                    id: identity.id,
-                    name: identity.name,
-                    email: identity.email,
-                    did: identity.did
-                },
-
-                ai: null,
-
-                securityDecision:
-                    "NO_PRIVATE_KEY",
-
-                accessGranted:
-                    false,
-
-                message:
-                    "Identity does not have a stored private key"
-            });
-        }
-
-        if (!identity.publicKey) {
-
-            return res.status(500).json({
-
-                verified: false,
-
-                identity: {
-                    id: identity.id,
-                    name: identity.name,
-                    email: identity.email,
-                    did: identity.did
-                },
-
-                ai: null,
-
-                securityDecision:
-                    "NO_PUBLIC_KEY",
-
-                accessGranted:
-                    false,
-
-                message:
-                    "Identity does not have a stored public key"
-            });
-        }
-
-        /*
-         * Create deterministic identity data.
-         */
-        const data =
-            JSON.stringify({
-
-                id:
-                    identity.id,
-
-                name:
-                    identity.name,
-
-                email:
-                    identity.email,
-
-                did:
-                    identity.did
-            });
-
-        /*
-         * Sign the identity data using
-         * the stored Ed25519 private key.
-         */
-        const signature =
-            crypto.sign(
-                null,
-                Buffer.from(data),
-                identity.privateKey
-            ).toString("base64");
-
-        /*
-         * Reuse the existing verification
-         * and AI security pipeline.
-         */
-        req.body = {
-
-            data,
-
-            signature,
-
-            publicKey:
-                identity.publicKey
-        };
-
-        return verifyIdentity(
-            req,
-            res
-        );
-
-    } catch (error) {
-
-        console.error(
-            "Registered identity verification error:",
-            error
-        );
-
-        return res.status(500).json({
-
-            verified: false,
-
-            identity: null,
-
-            ai: null,
-
-            securityDecision:
-                "VERIFICATION_ERROR",
-
-            accessGranted:
-                false,
-
-            message:
-                "An error occurred during identity verification",
-
-            error:
-                error.message
-        });
-    }
-};
-
-
-// --------------------------------------------------
-// EXPORT CONTROLLERS
-// --------------------------------------------------
 
 module.exports = {
-
     registerIdentity,
-
     getIdentities,
-
     verifyIdentity,
-
     verifyRegisteredIdentity,
-
     analyzeIdentityActivity,
-
     getAuthenticationEventHistory,
-
-    getIdentityActivity
+    getIdentityActivity,
+    updateIdentity,
+    revokeIdentity
 };
-

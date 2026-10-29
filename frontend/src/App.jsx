@@ -1,1126 +1,1051 @@
-import { useEffect, useState } from "react";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API_URL = "http://localhost:5000/api";
 
+function formatDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleString();
+}
+
+function StatusPill({ children, type = "neutral" }) {
+  return <span className={`status-pill ${type}`}>{children}</span>;
+}
+
 function App() {
-const [identities, setIdentities] = useState([]);
-const [selectedId, setSelectedId] = useState(null);
-const [activity, setActivity] = useState(null);
+  const [identities, setIdentities] = useState([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [search, setSearch] = useState("");
+  const [activity, setActivity] = useState(null);
+  const [verificationResult, setVerificationResult] = useState(null);
 
-const [loading, setLoading] = useState(true);
-const [registering, setRegistering] = useState(false);
-const [verifying, setVerifying] = useState(false);
-
-const [error, setError] = useState("");
-const [success, setSuccess] = useState("");
-const [verificationResult, setVerificationResult] = useState(null);
-
-const [name, setName] = useState("");
-const [email, setEmail] = useState("");
-
-// --------------------------------------------------
-// LOAD IDENTITIES
-// --------------------------------------------------
-
-const loadIdentities = async () => {
-try {
-const response = await fetch(`${API_URL}/identity`);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [editMode, setEditMode] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [revoking, setRevoking] = useState(false);
 
 
-  if (!response.ok) {
-    throw new Error("Failed to load identities");
-  }
+  const [loading, setLoading] = useState(true);
+  const [registering, setRegistering] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
-  const data = await response.json();
-
-  const list = Array.isArray(data)
-    ? data
-    : Array.isArray(data.identities)
-    ? data.identities
-    : [];
-
-  setIdentities(list);
-
-  // Keep current selection if it still exists.
-  if (
-    selectedId &&
-    list.some((identity) => identity.id === selectedId)
-  ) {
-    return list;
-  }
-
-  // Otherwise select the newest identity.
-  if (list.length > 0) {
-    setSelectedId(list[0].id);
-  } else {
-    setSelectedId(null);
-  }
-
-  return list;
-} catch (err) {
-  console.error("Identity loading error:", err);
-  setError(err.message || "Failed to load identities.");
-  return [];
-}
-
-
-};
-
-// --------------------------------------------------
-// LOAD ACTIVITY
-// --------------------------------------------------
-
-const loadActivity = async (identityId) => {
-if (!identityId) {
-setActivity(null);
-setLoading(false);
-return;
-}
-
-
-setLoading(true);
-setError("");
-
-try {
-  const response = await fetch(
-    `${API_URL}/identity/${identityId}/activity`
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data.message || "Failed to load identity activity"
-    );
-  }
-
-  setActivity(data);
-} catch (err) {
-  console.error("Activity loading error:", err);
-  setError(err.message || "Failed to load identity activity.");
-  setActivity(null);
-} finally {
-  setLoading(false);
-}
-
-
-};
-
-// --------------------------------------------------
-// REGISTER IDENTITY
-// --------------------------------------------------
-
-const registerIdentity = async (event) => {
-event.preventDefault();
-
-
-setError("");
-setSuccess("");
-setVerificationResult(null);
-
-const trimmedName = name.trim();
-const trimmedEmail = email.trim();
-
-if (!trimmedName || !trimmedEmail) {
-  setError("Name and email are required.");
-  return;
-}
-
-setRegistering(true);
-
-try {
-  const response = await fetch(
-    `${API_URL}/identity/register`,
-    {
-      method: "POST",
+  const request = useCallback(async (url, options = {}) => {
+    const response = await fetch(`${API_URL}${url}`, {
+      ...options,
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
       },
-      body: JSON.stringify({
-        name: trimmedName,
-        email: trimmedEmail
-      })
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(
+        data.message ||
+          data.error ||
+          `Request failed (${response.status})`
+      );
     }
+
+    return data;
+  }, []);
+
+  const loadIdentities = useCallback(
+    async (preferredId = "") => {
+      const data = await request("/identity");
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data.identities)
+          ? data.identities
+          : [];
+
+      setIdentities(list);
+
+      setSelectedId((current) => {
+        const preferred = preferredId || current;
+
+        if (
+          list.some(
+            (identity) =>
+              String(identity.id) === String(preferred)
+          )
+        ) {
+          return String(preferred);
+        }
+
+        return list.length ? String(list[0].id) : "";
+      });
+
+      return list;
+    },
+    [request]
   );
 
-  const data = await response.json();
+  const loadActivity = useCallback(
+    async (id) => {
+      if (!id) {
+        setActivity(null);
+        return;
+      }
 
-  if (!response.ok) {
-    throw new Error(
-      data.message || "Identity registration failed."
-    );
-  }
-
-  setSuccess(
-    "Identity registered successfully. Cryptographic identity and blockchain registration completed."
+      try {
+        const data = await request(
+          `/identity/${encodeURIComponent(id)}/activity`
+        );
+        setActivity(data);
+      } catch {
+        setActivity(null);
+      }
+    },
+    [request]
   );
 
-  setName("");
-  setEmail("");
+  useEffect(() => {
+    let active = true;
 
-  // Refresh identity list.
-  const updatedIdentities = await loadIdentities();
+    async function initialise() {
+      setLoading(true);
+      setError("");
 
-  // Select newly created identity.
-  const newIdentityId =
-    data.identity?.id ||
-    data.id ||
-    updatedIdentities[0]?.id;
+      try {
+        const data = await request("/identity");
 
-  if (newIdentityId) {
-    setSelectedId(Number(newIdentityId));
-    await loadActivity(Number(newIdentityId));
-  }
-} catch (err) {
-  console.error("Registration error:", err);
-  setError(
-    err.message || "Identity registration failed."
-  );
-} finally {
-  setRegistering(false);
-}
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data.identities)
+            ? data.identities
+            : [];
 
+        if (!active) return;
 
-};
-
-// --------------------------------------------------
-// VERIFY IDENTITY
-// --------------------------------------------------
-
-const verifyIdentity = async () => {
-if (!selectedId) {
-setError("Please select an identity first.");
-return;
-}
-
-
-setVerifying(true);
-setError("");
-setSuccess("");
-setVerificationResult(null);
-
-try {
-  const response = await fetch(
-    `${API_URL}/identity/${selectedId}/verify`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
+        setIdentities(list);
+        setSelectedId(
+          list.length ? String(list[0].id) : ""
+        );
+      } catch (err) {
+        if (active) {
+          setError(
+            `Could not load identities. ${err.message}`
+          );
+        }
+      } finally {
+        if (active) setLoading(false);
       }
     }
-  );
 
-  const data = await response.json();
+    initialise();
 
-  setVerificationResult(data);
+    return () => {
+      active = false;
+    };
+  }, [request]);
 
-  if (!response.ok) {
-    setError(
-      data.message || "Identity verification failed."
+  useEffect(() => {
+    setVerificationResult(null);
+    setSuccess("");
+    setError("");
+    loadActivity(selectedId);
+  }, [selectedId, loadActivity]);
+
+  // Only consider the selected identity valid if it exists
+  // in the registered list AND matches the current search.
+  const selectedIdentity = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    const selected = identities.find(
+      (item) => String(item.id) === String(selectedId)
     );
-  } else if (
-    data.verified &&
-    data.accessGranted
-  ) {
-    setSuccess(
-      "Identity successfully verified. Access granted."
+
+    if (!selected) return null;
+    if (!query) return selected;
+
+    const values = [
+      selected.name,
+      selected.email,
+      selected.did,
+      selected.id,
+    ];
+
+    return values.some((value) =>
+      String(value ?? "").toLowerCase().includes(query)
+    )
+      ? selected
+      : null;
+  }, [identities, selectedId, search]);
+
+  const filteredIdentities = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    if (!query) return identities;
+
+    return identities.filter((identity) =>
+      [
+        identity.name,
+        identity.email,
+        identity.did,
+        identity.id,
+      ].some((value) =>
+        String(value ?? "").toLowerCase().includes(query)
+      )
     );
-  } else if (data.verified) {
-    setError(
-      data.message ||
-        "Identity was verified but access was blocked."
-    );
-  } else {
-    setError(
-      data.message ||
-        "Identity verification failed."
-    );
+  }, [identities, search]);
+
+  const stats = activity?.stats || {};
+  const events = Array.isArray(activity?.events)
+    ? activity.events
+    : [];
+
+  const riskScore =
+    verificationResult?.ai?.riskScore ??
+    activity?.ai?.riskScore;
+
+  const aiStatus =
+    verificationResult?.ai?.status ??
+    activity?.ai?.status;
+
+  function beginEditIdentity() {
+    if (!selectedIdentity) return;
+
+    setEditName(selectedIdentity.name || "");
+    setEditEmail(selectedIdentity.email || "");
+    setEditMode(true);
+    setError("");
+    setSuccess("");
   }
 
-  // Refresh activity so the new authentication event
-  // and updated AI risk score are displayed.
-  await loadActivity(selectedId);
-} catch (err) {
-  console.error("Verification error:", err);
+  function cancelEditIdentity() {
+    setEditMode(false);
+    setEditName("");
+    setEditEmail("");
+  }
 
-  setError(
-    "Unable to connect to the identity verification service."
-  );
-} finally {
-  setVerifying(false);
-}
+  async function saveIdentityChanges() {
+    if (!selectedIdentity) return;
 
+    if (!editName.trim() || !editEmail.trim()) {
+      setError("Enter both the name and email address.");
+      return;
+    }
 
-};
+    setError("");
+    setSuccess("");
+    setSavingEdit(true);
 
-// --------------------------------------------------
-// INITIAL LOAD
-// --------------------------------------------------
+    try {
+      await request(`/identity/${encodeURIComponent(selectedIdentity.id)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: editName.trim(),
+          email: editEmail.trim(),
+        }),
+      });
 
-useEffect(() => {
-loadIdentities();
-}, []);
+      await loadIdentities(selectedIdentity.id);
+      setEditMode(false);
+      setSuccess("Identity details updated successfully.");
+    } catch (err) {
+      setError(`Could not update identity: ${err.message}`);
+    } finally {
+      setSavingEdit(false);
+    }
+  }
 
-// --------------------------------------------------
-// LOAD SELECTED IDENTITY ACTIVITY
-// --------------------------------------------------
+  async function revokeSelectedIdentity() {
+    if (!selectedIdentity) return;
 
-useEffect(() => {
-if (selectedId) {
-setVerificationResult(null);
-loadActivity(selectedId);
-}
-}, [selectedId]);
+    const isActive =
+      selectedIdentity.active === true ||
+      Number(selectedIdentity.active ?? 1) === 1;
 
-// --------------------------------------------------
-// HELPERS
-// --------------------------------------------------
+    if (!isActive) {
+      setError("This identity has already been revoked.");
+      return;
+    }
 
-const formatDate = (date) => {
-if (!date) {
-return "N/A";
-}
+    const confirmed = window.confirm(
+      `Revoke the identity for ${selectedIdentity.name || "this person"}? ` +
+      "This will deactivate it on the blockchain and prevent future verification. " +
+      "The identity record and its history will be preserved."
+    );
 
+    if (!confirmed) return;
 
-const parsedDate = new Date(date);
+    setError("");
+    setSuccess("");
+    setVerificationResult(null);
+    setRevoking(true);
 
-if (Number.isNaN(parsedDate.getTime())) {
-  return "Invalid date";
-}
+    try {
+      const result = await request(
+        `/identity/${encodeURIComponent(selectedIdentity.id)}/revoke`,
+        { method: "POST", body: JSON.stringify({}) }
+      );
 
-return parsedDate.toLocaleString();
+      await loadIdentities(selectedIdentity.id);
+      await loadActivity(selectedIdentity.id);
 
+      setEditMode(false);
+      setSuccess(
+        result.message || "Identity revoked successfully."
+      );
+    } catch (err) {
+      setError(`Could not revoke identity: ${err.message}`);
+    } finally {
+      setRevoking(false);
+    }
+  }
 
-};
+  async function registerIdentity(event) {
+    event.preventDefault();
 
-const getRiskClass = (status) => {
-switch (status) {
-case "HIGH_RISK":
-return "high";
+    setError("");
+    setSuccess("");
+    setVerificationResult(null);
 
+    if (!name.trim() || !email.trim()) {
+      setError(
+        "Enter both the person's name and email address."
+      );
+      return;
+    }
 
-  case "SUSPICIOUS":
-    return "suspicious";
+    setRegistering(true);
 
-  default:
-    return "normal";
-}
+    try {
+      const result = await request("/identity/register", {
+        method: "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+        }),
+      });
 
+      const created = result.identity || result;
+      const newId = created.id ?? result.id;
 
-};
+      setName("");
+      setEmail("");
 
-const getVerificationClass = () => {
-if (!verificationResult) {
-return "";
-}
+      setSuccess(
+        `Identity registered successfully${
+          newId !== undefined ? ` (ID ${newId})` : ""
+        }.`
+      );
 
+      const list = await loadIdentities(newId ?? "");
 
-if (
-  verificationResult.verified &&
-  verificationResult.accessGranted
-) {
-  return "verification-success";
-}
+      if (
+        newId !== undefined &&
+        list.some(
+          (item) => String(item.id) === String(newId)
+        )
+      ) {
+        setSelectedId(String(newId));
+        setSearch("");
+      }
+    } catch (err) {
+      setError(`Registration failed: ${err.message}`);
+    } finally {
+      setRegistering(false);
+    }
+  }
 
-return "verification-failed";
+  async function verifyIdentity() {
+    // Never send a verification request when the search
+    // has no matching registered identity.
+    if (!selectedIdentity) {
+      setError(
+        "Access denied: no matching registered identity was found."
+      );
+      setSuccess("");
+      setVerificationResult(null);
+      return;
+    }
 
+    setError("");
+    setSuccess("");
+    setVerificationResult(null);
+    setVerifying(true);
 
-};
+    try {
+      const result = await request(
+        `/identity/${encodeURIComponent(selectedIdentity.id)}/verify`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        }
+      );
 
-const selectedIdentity = identities.find(
-(identity) => identity.id === selectedId
-);
+      setVerificationResult(result);
 
-const events = Array.isArray(activity?.events)
-? activity.events
-: [];
+      if (result.verified !== true) {
+        setError(
+          result.message ||
+            "Identity verification failed. Access denied."
+        );
+      } else if (result.accessGranted === true) {
+        setSuccess(
+          "Identity verified successfully. Access granted."
+        );
+      } else {
+        setError(
+          result.message ||
+            `Identity authenticated, but access was denied. Security decision: ${
+              result.securityDecision || "ACCESS_DENIED"
+            }.`
+        );
+      }
 
-const verificationAttempts =
-activity?.stats?.verificationAttempts ?? 0;
+      await loadActivity(selectedIdentity.id);
+    } catch (err) {
+      setVerificationResult(null);
+      setSuccess("");
+      setError(`Verification failed: ${err.message}`);
+    } finally {
+      setVerifying(false);
+    }
+  }
 
-const failedVerifications =
-activity?.stats?.failedVerifications ?? 0;
+  const blockchainVerified =
+    verificationResult?.blockchain?.verified === true;
 
-const uniqueIPs =
-activity?.stats?.uniqueIPs ?? 0;
+  const blockchainActive =
+    verificationResult?.blockchain?.active === true;
 
-const riskScore =
-activity?.ai?.riskScore ?? 0;
+  const cryptoVerified =
+    verificationResult?.verified === true;
 
-const aiStatus =
-activity?.ai?.status || "UNKNOWN";
+  const accessGranted =
+    verificationResult?.verified === true &&
+    verificationResult?.accessGranted === true;
 
-const did =
-activity?.identity?.did ||
-selectedIdentity?.did ||
-"DID NOT AVAILABLE";
+  const hasVerification = verificationResult !== null;
 
-const publicKey =
-selectedIdentity?.publicKey || "";
-
-// --------------------------------------------------
-// UI
-// --------------------------------------------------
-
-return ( <div className="app">
-
-
-  {/* HEADER */}
-
-  <header className="topbar">
-    <div className="brand">
-      <div className="brand-icon">◆</div>
-
-      <div>
-        <h1>AIID Security</h1>
-        <span>
-          Self-Sovereign Identity Platform
-        </span>
-      </div>
-    </div>
-
-    <div className="system-status">
-      <span className="status-dot"></span>
-      SYSTEM ONLINE
-    </div>
-  </header>
-
-  <main className="dashboard">
-
-    {/* HERO */}
-
-    <section className="hero">
-      <div>
-        <p className="eyebrow">
-          AI-ENHANCED BLOCKCHAIN IDENTITY
-        </p>
-
-        <h2>
-          Identity Security
-          <br />
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <a
+          className="brand"
+          href="#dashboard"
+          aria-label="ImaraID dashboard"
+        >
+          <span className="brand-mark">I</span>
           <span>
-            Intelligence Dashboard
+            <strong>
+              Imara<span>ID</span>
+            </strong>
+            <small>Digital identity security</small>
           </span>
-        </h2>
+        </a>
 
-        <p className="hero-text">
-          Secure digital identities using
-          decentralized identifiers, blockchain
-          verification, cryptography and
-          AI-powered anomaly detection.
-        </p>
-      </div>
-
-      <div className="hero-badge">
-        <div className="shield">⬢</div>
-        <span>AI PROTECTED</span>
-      </div>
-    </section>
-
-    {/* REGISTER */}
-
-    <section className="register-panel">
-      <div className="register-heading">
-        <p className="card-label">
-          IDENTITY MANAGEMENT
-        </p>
-
-        <h3>Register New Identity</h3>
-
-        <p>
-          Create a decentralized identity and
-          register its cryptographic identity
-          on the blockchain.
-        </p>
-      </div>
-
-      <form
-        className="register-form"
-        onSubmit={registerIdentity}
-      >
-        <div className="input-group">
-          <label>FULL NAME</label>
-
-          <input
-            type="text"
-            placeholder="e.g. John Kamau"
-            value={name}
-            onChange={(event) =>
-              setName(event.target.value)
-            }
-            disabled={registering}
-          />
+        <div className="topbar-right">
+          <span className="system-indicator">
+            <span />
+            Local system
+          </span>
+          <a className="topbar-link" href="#dashboard">
+            Dashboard
+          </a>
         </div>
+      </header>
 
-        <div className="input-group">
-          <label>EMAIL ADDRESS</label>
-
-          <input
-            type="email"
-            placeholder="john@example.com"
-            value={email}
-            onChange={(event) =>
-              setEmail(event.target.value)
-            }
-            disabled={registering}
-          />
-        </div>
-
-        <button
-          type="submit"
-          className="register-button"
-          disabled={registering}
-        >
-          {registering
-            ? "REGISTERING..."
-            : "＋ REGISTER IDENTITY"}
-        </button>
-      </form>
-    </section>
-
-    {/* MESSAGES */}
-
-    {success && (
-      <div className="success-box">
-        <strong>✓ SUCCESS</strong>
-        <span>{success}</span>
-      </div>
-    )}
-
-    {error && (
-      <div className="error-box">
-        <strong>System Message</strong>
-        <p>{error}</p>
-      </div>
-    )}
-
-    {/* IDENTITY SELECTOR */}
-
-    <section className="control-panel">
-      <div>
-        <label htmlFor="identity">
-          SELECT IDENTITY
-        </label>
-
-        <select
-          id="identity"
-          value={selectedId ?? ""}
-          onChange={(event) => {
-            const value = event.target.value;
-
-            setSelectedId(
-              value ? Number(value) : null
-            );
-          }}
-          disabled={identities.length === 0}
-        >
-          {identities.length > 0 ? (
-            identities.map((identity) => (
-              <option
-                key={identity.id}
-                value={identity.id}
-              >
-                #{identity.id} — {identity.name}
-              </option>
-            ))
-          ) : (
-            <option value="">
-              No identities available
-            </option>
-          )}
-        </select>
-      </div>
-
-      <div className="identity-actions">
-
-        <button
-          className="refresh-button"
-          onClick={() =>
-            loadActivity(selectedId)
-          }
-          disabled={loading || !selectedId}
-        >
-          ↻ Refresh Analysis
-        </button>
-
-        <button
-          className="verify-button"
-          onClick={verifyIdentity}
-          disabled={
-            verifying ||
-            !selectedId ||
-            loading
-          }
-        >
-          {verifying
-            ? "VERIFYING..."
-            : "✓ VERIFY IDENTITY"}
-        </button>
-
-      </div>
-    </section>
-
-    {/* SELECTED IDENTITY SUMMARY */}
-
-    {selectedIdentity && (
-      <section className="identity-card">
-
-        <div className="identity-main">
-
-          <div className="identity-avatar">
-            {selectedIdentity.name
-              ? selectedIdentity.name
-                  .charAt(0)
-                  .toUpperCase()
-              : "I"}
-          </div>
-
+      <main id="dashboard" className="page-content">
+        <section className="welcome-section">
           <div>
-            <p className="card-label">
-              SELECTED DIGITAL IDENTITY
+            <p className="eyebrow">
+              IDENTITY ASSURANCE PLATFORM
             </p>
-
-            <h3>
-              {selectedIdentity.name}
-            </h3>
-
-            <p className="email">
-              {selectedIdentity.email}
+            <h1>Identity security dashboard</h1>
+            <p className="welcome-copy">
+              Register digital identities, verify authenticity
+              and review AI-assisted security decisions.
             </p>
           </div>
 
-        </div>
-
-        <div className="did">
-          <span>
-            DECENTRALIZED IDENTIFIER
-          </span>
-
-          <code>{did}</code>
-        </div>
-
-      </section>
-    )}
-
-    {/* VERIFICATION RESULT */}
-
-    {verificationResult && (
-      <section
-        className={`verification-result ${getVerificationClass()}`}
-      >
-        <div className="verification-result-header">
-
-          <div>
-            <p className="card-label">
-              LIVE VERIFICATION RESULT
-            </p>
-
-            <h3>
-              {verificationResult.accessGranted
-                ? "Identity Verified"
-                : verificationResult.verified
-                ? "Identity Verified — Access Blocked"
-                : "Identity Verification Failed"}
-            </h3>
+          <div className="header-chip">
+            <span className="chip-icon">◆</span>
+            Blockchain + AI
           </div>
-
-          <span
-            className={
-              verificationResult.accessGranted
-                ? "verified-badge"
-                : "blocked-badge"
-            }
-          >
-            {verificationResult.accessGranted
-              ? "✓ ACCESS GRANTED"
-              : "✕ ACCESS BLOCKED"}
-          </span>
-
-        </div>
-
-        <div className="verification-result-grid">
-
-          <div>
-            <span>
-              CRYPTOGRAPHIC STATUS
-            </span>
-
-            <strong>
-              {verificationResult.verified
-                ? "✓ VERIFIED"
-                : "✕ FAILED"}
-            </strong>
-          </div>
-
-          <div>
-            <span>AI STATUS</span>
-
-            <strong>
-              {verificationResult.ai?.status ||
-                "N/A"}
-            </strong>
-          </div>
-
-          <div>
-            <span>RISK SCORE</span>
-
-            <strong>
-              {verificationResult.ai?.riskScore ??
-                "N/A"}
-            </strong>
-          </div>
-
-          <div>
-            <span>
-              SECURITY DECISION
-            </span>
-
-            <strong>
-              {verificationResult.securityDecision ||
-                "N/A"}
-            </strong>
-          </div>
-
-        </div>
-
-        <p className="verification-message">
-          {verificationResult.message ||
-            "Verification process completed."}
-        </p>
-
-      </section>
-    )}
-
-    {/* LOADING */}
-
-    {loading && (
-      <div className="loading">
-        <div className="loader"></div>
-        Loading identity intelligence...
-      </div>
-    )}
-
-    {/* ACTIVITY */}
-
-    {activity && !loading && (
-      <>
-
-        {/* STATISTICS */}
-
-        <section className="stats-grid">
-
-          <div className="stat-card">
-            <span className="stat-icon">◎</span>
-
-            <div>
-              <p>
-                VERIFICATION ATTEMPTS
-              </p>
-
-              <strong>
-                {verificationAttempts}
-              </strong>
-            </div>
-          </div>
-
-          <div className="stat-card danger">
-            <span className="stat-icon">!</span>
-
-            <div>
-              <p>
-                FAILED VERIFICATIONS
-              </p>
-
-              <strong>
-                {failedVerifications}
-              </strong>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <span className="stat-icon">◉</span>
-
-            <div>
-              <p>
-                UNIQUE IP ADDRESSES
-              </p>
-
-              <strong>
-                {uniqueIPs}
-              </strong>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <span className="stat-icon">◆</span>
-
-            <div>
-              <p>AI RISK SCORE</p>
-
-              <strong>
-                {riskScore}
-              </strong>
-            </div>
-          </div>
-
         </section>
 
-        {/* ANALYSIS */}
-
-        <section className="analysis-grid">
-
-          {/* AI PANEL */}
-
-          <div className="panel ai-panel">
-
-            <div className="panel-header">
-
-              <div>
-                <p className="card-label">
-                  MACHINE LEARNING
-                </p>
-
-                <h3>
-                  AI Security Analysis
-                </h3>
-              </div>
-
-              <span
-                className={`risk-badge ${getRiskClass(
-                  aiStatus
-                )}`}
-              >
-                {aiStatus}
-              </span>
-
-            </div>
-
-            <div className="risk-display">
-
-              <div className="risk-circle">
-
-                <div>
-                  <strong>
-                    {riskScore}
-                  </strong>
-
-                  <span>/ 100</span>
-                </div>
-
-              </div>
-
-              <div className="risk-information">
-
-                <div className="risk-row">
-                  <span>
-                    Anomaly detected
-                  </span>
-
-                  <strong
-                    className={
-                      activity.ai?.anomaly
-                        ? "danger-text"
-                        : "success-text"
-                    }
-                  >
-                    {activity.ai?.anomaly
-                      ? "YES"
-                      : "NO"}
-                  </strong>
-                </div>
-
-                <div className="risk-row">
-                  <span>
-                    Security decision
-                  </span>
-
-                  <strong>
-                    {activity.securityDecision ||
-                      "N/A"}
-                  </strong>
-                </div>
-
-                <div className="risk-row">
-                  <span>Access</span>
-
-                  <strong
-                    className={
-                      activity.accessGranted
-                        ? "success-text"
-                        : "danger-text"
-                    }
-                  >
-                    {activity.accessGranted
-                      ? "GRANTED"
-                      : "BLOCKED"}
-                  </strong>
-                </div>
-
-              </div>
-            </div>
-
-            <div className="ai-explanation">
-
-              <span>AI ASSESSMENT</span>
-
-              <p>
-                {aiStatus === "HIGH_RISK"
-                  ? "The machine-learning model detected highly abnormal identity activity. Access has been blocked."
-                  : aiStatus === "SUSPICIOUS"
-                  ? "The machine-learning model detected suspicious authentication behaviour. Security review is required."
-                  : "The machine-learning model found no significant anomaly in the identity's authentication behaviour."}
-              </p>
-
-            </div>
-
+        {error && (
+          <div className="notice error-notice" role="alert">
+            <strong>Access or operation error</strong>
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => setError("")}
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
           </div>
+        )}
 
-          {/* BLOCKCHAIN */}
+        {success && (
+          <div
+            className="notice success-notice"
+            role="status"
+          >
+            <strong>Success</strong>
+            <span>{success}</span>
+            <button
+              type="button"
+              onClick={() => setSuccess("")}
+              aria-label="Dismiss message"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
-          <div className="panel blockchain-panel">
+        <section
+          className="metric-grid"
+          aria-label="Identity activity summary"
+        >
+          <article className="metric-card">
+            <div className="metric-top">
+              <span className="metric-icon indigo">ID</span>
+              <span className="metric-label">REGISTERED</span>
+            </div>
+            <strong className="metric-value">
+              {loading ? "…" : identities.length}
+            </strong>
+            <span className="metric-foot">
+              Identities in the registry
+            </span>
+          </article>
 
-            <div className="panel-header">
-
-              <div>
-                <p className="card-label">
-                  DECENTRALIZED TRUST
-                </p>
-
-                <h3>
-                  Blockchain Verification
-                </h3>
-              </div>
-
-              <span className="verified-badge">
-                ✓ VERIFIED
+          <article className="metric-card">
+            <div className="metric-top">
+              <span className="metric-icon teal">✓</span>
+              <span className="metric-label">
+                VERIFICATION ATTEMPTS
               </span>
+            </div>
+            <strong className="metric-value">
+              {stats.verificationAttempts ?? 0}
+            </strong>
+            <span className="metric-foot">
+              For the selected identity
+            </span>
+          </article>
 
+          <article className="metric-card">
+            <div className="metric-top">
+              <span className="metric-icon amber">!</span>
+              <span className="metric-label">
+                FAILED ATTEMPTS
+              </span>
+            </div>
+            <strong className="metric-value">
+              {stats.failedVerifications ?? 0}
+            </strong>
+            <span className="metric-foot">
+              Recorded unsuccessful attempts
+            </span>
+          </article>
+
+          <article className="metric-card">
+            <div className="metric-top">
+              <span className="metric-icon blue">AI</span>
+              <span className="metric-label">
+                AI RISK SCORE
+              </span>
+            </div>
+            <strong className="metric-value">
+              {riskScore === undefined || riskScore === null
+                ? "—"
+                : Number(riskScore).toFixed(1)}
+            </strong>
+            <span className="metric-foot">
+              {aiStatus || "Run verification for analysis"}
+            </span>
+          </article>
+        </section>
+
+        <div className="main-grid">
+          <section className="panel registration-panel">
+            <div className="panel-heading">
+              <div className="section-icon">＋</div>
+              <div>
+                <h2>Register an identity</h2>
+                <p>Create a digital identity record</p>
+              </div>
             </div>
 
-            <div className="verification-list">
+            <form
+              className="identity-form"
+              onSubmit={registerIdentity}
+            >
+              <label htmlFor="person-name">Full name</label>
+              <input
+                id="person-name"
+                value={name}
+                onChange={(event) =>
+                  setName(event.target.value)
+                }
+                placeholder="Enter full name"
+                autoComplete="name"
+                required
+              />
 
-              <div>
-                <span className="check">✓</span>
+              <label htmlFor="person-email">
+                Email address
+              </label>
+              <input
+                id="person-email"
+                type="email"
+                value={email}
+                onChange={(event) =>
+                  setEmail(event.target.value)
+                }
+                placeholder="person@example.com"
+                autoComplete="email"
+                required
+              />
 
-                <div>
-                  <strong>
-                    Identity Registered
-                  </strong>
+              <button
+                className="primary-button"
+                type="submit"
+                disabled={registering}
+              >
+                {registering
+                  ? "Registering identity…"
+                  : "Register identity"}
+                {!registering && <span>→</span>}
+              </button>
+            </form>
 
-                  <small>
-                    Identity exists in the
-                    identity registry
-                  </small>
-                </div>
+            <div className="info-note">
+              <span>i</span>
+              <p>
+                Registration creates the identity record and
+                initiates the configured identity and
+                blockchain workflow.
+              </p>
+            </div>
+          </section>
+
+          <section className="panel verification-panel">
+            <div className="panel-heading">
+              <div className="section-icon verify-icon">
+                ✓
               </div>
-
               <div>
-                <span className="check">✓</span>
-
-                <div>
-                  <strong>
-                    Decentralized Identifier
-                  </strong>
-
-                  <small>
-                    DID associated with
-                    registered identity
-                  </small>
-                </div>
+                <h2>Verify an identity</h2>
+                <p>Find and verify a registered record</p>
               </div>
-
-              <div>
-                <span className="check">✓</span>
-
-                <div>
-                  <strong>
-                    Cryptographic Identity
-                  </strong>
-
-                  <small>
-                    Public key associated with
-                    the identity
-                  </small>
-                </div>
-              </div>
-
-              <div>
-                <span className="check">✓</span>
-
-                <div>
-                  <strong>
-                    AI Security Layer
-                  </strong>
-
-                  <small>
-                    Behaviour analyzed by ML
-                    anomaly detector
-                  </small>
-                </div>
-              </div>
-
             </div>
 
-            {publicKey && (
-              <div className="did">
-                <span>
-                  PUBLIC KEY
-                </span>
+            <label htmlFor="identity-search">
+              Search registered identities
+            </label>
+            <input
+              id="identity-search"
+              className="search-input"
+              value={search}
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
+              placeholder="Search by name, email, DID or ID…"
+            />
 
-                <code>
-                  {publicKey}
-                </code>
+            <label htmlFor="identity-select">
+              Select identity
+            </label>
+            <select
+              id="identity-select"
+              value={
+                selectedIdentity ? String(selectedId) : ""
+              }
+              onChange={(event) =>
+                setSelectedId(event.target.value)
+              }
+              disabled={
+                loading || filteredIdentities.length === 0
+              }
+            >
+              <option value="">
+                {filteredIdentities.length === 0
+                  ? "No matching identities"
+                  : "Select a registered identity"}
+              </option>
+
+              {filteredIdentities.map((identity) => (
+                <option
+                  key={identity.id}
+                  value={String(identity.id)}
+                >
+                  {identity.name || "Unnamed identity"} ·{" "}
+                  {identity.email || `ID ${identity.id}`}
+                </option>
+              ))}
+            </select>
+
+            {selectedIdentity ? (
+              <>
+                <div className="selected-identity">
+                  <div className="avatar">
+                    {(selectedIdentity.name || "I").trim().charAt(0).toUpperCase()}
+                  </div>
+                  <div className="selected-details">
+                    <strong>{selectedIdentity.name || "Unnamed identity"}</strong>
+                    <span>{selectedIdentity.email || "No email recorded"}</span>
+                    <small>{selectedIdentity.did || `Identity ID: ${selectedIdentity.id}`}</small>
+                  </div>
+                  <StatusPill
+                    type={
+                      selectedIdentity.active === false ||
+                      Number(selectedIdentity.active ?? 1) === 0
+                        ? "bad" : "good"
+                    }
+                  >
+                    {selectedIdentity.active === false ||
+                    Number(selectedIdentity.active ?? 1) === 0
+                      ? "Revoked" : "Active"}
+                  </StatusPill>
+                </div>
+
+                <div className="identity-actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={editMode ? cancelEditIdentity : beginEditIdentity}
+                    disabled={savingEdit || revoking}
+                  >
+                    {editMode ? "Cancel edit" : "Edit identity"}
+                  </button>
+                  <button
+                    className="danger-button"
+                    type="button"
+                    onClick={revokeSelectedIdentity}
+                    disabled={
+                      savingEdit || revoking ||
+                      selectedIdentity.active === false ||
+                      Number(selectedIdentity.active ?? 1) === 0
+                    }
+                  >
+                    {revoking ? "Revoking…" : "Revoke identity"}
+                  </button>
+                </div>
+
+                {editMode && (
+                  <form
+                    className="identity-edit-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveIdentityChanges();
+                    }}
+                  >
+                    <h3>Edit identity details</h3>
+                    <label htmlFor="edit-identity-name">Full name</label>
+                    <input
+                      id="edit-identity-name"
+                      value={editName}
+                      onChange={(event) => setEditName(event.target.value)}
+                      required
+                      maxLength={120}
+                      disabled={savingEdit}
+                    />
+                    <label htmlFor="edit-identity-email">Email address</label>
+                    <input
+                      id="edit-identity-email"
+                      type="email"
+                      value={editEmail}
+                      onChange={(event) => setEditEmail(event.target.value)}
+                      required
+                      maxLength={254}
+                      disabled={savingEdit}
+                    />
+                    <button className="primary-button" type="submit" disabled={savingEdit}>
+                      {savingEdit ? "Saving changes…" : "Save changes"}
+                    </button>
+                  </form>
+                )}
+              </>
+            ) : (
+              <div className="empty-selection">
+                {loading ? "Loading identity records…" : "No registered identity matches your search."}
               </div>
             )}
 
+            <button
+              className="primary-button verify-button"
+              type="button"
+              onClick={verifyIdentity}
+              disabled={
+                verifying || loading || !selectedIdentity ||
+                selectedIdentity.active === false ||
+                Number(selectedIdentity.active ?? 1) === 0
+              }
+            >
+              {verifying
+                ? "Verifying identity…"
+                : "Verify selected identity"}
+              {!verifying && <span>→</span>}
+            </button>
+
+            <p className="form-helper">
+              Only a matching registered identity can be
+              submitted for verification. A name search alone
+              does not authenticate a person.
+            </p>
+          </section>
+        </div>
+
+        <section className="panel results-panel">
+          <div className="panel-heading results-heading">
+            <div className="section-icon result-icon">
+              ✓
+            </div>
+            <div>
+              <h2>Security verification result</h2>
+              <p>
+                Cryptographic, blockchain and AI assessment
+              </p>
+            </div>
+
+            {hasVerification && (
+              <StatusPill
+                type={accessGranted ? "good" : "bad"}
+              >
+                {accessGranted
+                  ? "Access granted"
+                  : "Access denied"}
+              </StatusPill>
+            )}
           </div>
 
-        </section>
+          {!hasVerification ? (
+            <div className="result-empty">
+              <div className="empty-shield">◇</div>
+              <strong>No new verification result</strong>
+              <p>
+                Select a registered identity and run
+                verification to view its security assessment
+                here.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="result-summary">
+                <div>
+                  <span className="result-caption">
+                    SECURITY DECISION
+                  </span>
+                  <h3>
+                    {verificationResult.securityDecision ||
+                      (accessGranted
+                        ? "VERIFIED"
+                        : "NOT VERIFIED")}
+                  </h3>
+                  <p>
+                    {verificationResult.message ||
+                      "Verification request completed."}
+                  </p>
+                </div>
 
-        {/* AUTHENTICATION EVENTS */}
+                <StatusPill
+                  type={accessGranted ? "good" : "bad"}
+                >
+                  {accessGranted
+                    ? "Access granted"
+                    : "Access not granted"}
+                </StatusPill>
+              </div>
+
+              <div className="checks-grid">
+                <div className="check-card">
+                  <span className="check-label">
+                    Cryptographic verification
+                  </span>
+                  <StatusPill
+                    type={cryptoVerified ? "good" : "bad"}
+                  >
+                    {cryptoVerified
+                      ? "Verified"
+                      : "Not verified"}
+                  </StatusPill>
+                  <small>
+                    Digital signature and identity verification
+                    result
+                  </small>
+                </div>
+
+                <div className="check-card">
+                  <span className="check-label">
+                    Blockchain record
+                  </span>
+                  <StatusPill
+                    type={
+                      blockchainVerified && blockchainActive
+                        ? "good"
+                        : "bad"
+                    }
+                  >
+                    {blockchainVerified && blockchainActive
+                      ? "Verified and active"
+                      : "Not confirmed"}
+                  </StatusPill>
+                  <small>
+                    {verificationResult.blockchain
+                      ?.contractAddress
+                      ? `Contract: ${verificationResult.blockchain.contractAddress}`
+                      : "Based on the returned blockchain verification response"}
+                  </small>
+                </div>
+
+                <div className="check-card">
+                  <span className="check-label">
+                    AI risk assessment
+                  </span>
+                  <StatusPill
+                    type={
+                      verificationResult.ai?.anomaly
+                        ? "bad"
+                        : "neutral"
+                    }
+                  >
+                    {verificationResult.ai?.status ||
+                      "No status returned"}
+                  </StatusPill>
+                  <small>
+                    Risk score:{" "}
+                    {verificationResult.ai?.riskScore ??
+                      "Not provided"}
+                    {verificationResult.ai?.anomaly === true
+                      ? " · Anomaly detected"
+                      : ""}
+                  </small>
+                </div>
+              </div>
+
+              {verificationResult.blockchain?.identityHash && (
+                <div className="hash-row">
+                  <span>Blockchain identity hash</span>
+                  <code>
+                    {verificationResult.blockchain.identityHash}
+                  </code>
+                </div>
+              )}
+            </>
+          )}
+        </section>
 
         <section className="panel activity-panel">
-
-          <div className="panel-header">
-
-            <div>
-              <p className="card-label">
-                AUDIT TRAIL
-              </p>
-
-              <h3>
-                Authentication Activity
-              </h3>
+          <div className="panel-heading activity-heading">
+            <div className="section-icon activity-icon">
+              ≋
             </div>
-
-            <span className="event-count">
-              {events.length} EVENTS
-            </span>
-
-          </div>
-
-          <div className="table-wrapper">
-
-            <table>
-
-              <thead>
-                <tr>
-                  <th>EVENT</th>
-                  <th>RESULT</th>
-                  <th>IP ADDRESS</th>
-                  <th>TIMESTAMP</th>
-                </tr>
-              </thead>
-
-              <tbody>
-
-                {events.length > 0 ? (
-                  events.map((event) => (
-                    <tr key={event.id}>
-
-                      <td>
-                        <span className="event-id">
-                          #{event.id}
-                        </span>
-                      </td>
-
-                      <td>
-                        <span
-                          className={`event-result ${
-                            event.success
-                              ? "success"
-                              : "failure"
-                          }`}
-                        >
-                          {event.success
-                            ? "✓ SUCCESS"
-                            : "✕ FAILED"}
-                        </span>
-                      </td>
-
-                      <td>
-                        <code>
-                          {event.ipAddress ||
-                            "UNKNOWN"}
-                        </code>
-                      </td>
-
-                      <td>
-                        {formatDate(
-                          event.createdAt
-                        )}
-                      </td>
-
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td
-                      colSpan="4"
-                      style={{
-                        textAlign: "center"
-                      }}
-                    >
-                      No authentication events
-                      recorded yet.
-                    </td>
-                  </tr>
-                )}
-
-              </tbody>
-
-            </table>
-
-          </div>
-
-        </section>
-
-      </>
-    )}
-
-    {/* EMPTY STATE */}
-
-    {!loading &&
-      identities.length === 0 && (
-        <section className="panel">
-          <div className="panel-header">
             <div>
-              <p className="card-label">
-                IDENTITY REGISTRY
-              </p>
-
-              <h3>
-                No identities registered
-              </h3>
-
+              <h2>Identity activity</h2>
               <p>
-                Register your first digital
-                identity using the form above.
+                Recent events for the selected identity
               </p>
             </div>
+
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => loadActivity(selectedId)}
+              disabled={!selectedId}
+            >
+              Refresh activity
+            </button>
           </div>
+
+          {!selectedId ? (
+            <div className="table-empty">
+              Register or select an identity to view its
+              activity.
+            </div>
+          ) : events.length === 0 ? (
+            <div className="table-empty">
+              No activity events are available for this
+              identity yet.
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Event ID</th>
+                    <th>Event type</th>
+                    <th>Outcome</th>
+                    <th>IP address</th>
+                    <th>Date and time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((event, index) => (
+                    <tr
+                      key={
+                        event.id ??
+                        `${event.createdAt}-${index}`
+                      }
+                    >
+                      <td>{event.id ?? "—"}</td>
+                      <td>
+                        {({
+                          IDENTITY_REGISTERED: "Identity registered",
+                          IDENTITY_UPDATED: "Identity updated",
+                          IDENTITY_REVOKED: "Identity revoked",
+                          VERIFICATION_SUCCEEDED: "Verification",
+                          VERIFICATION_FAILED: "Verification",
+                        })[event.eventType] || event.eventType || "Verification"}
+                      </td>
+                      <td>
+                        <StatusPill
+                          type={
+                            event.eventType === "IDENTITY_REVOKED"
+                              ? "bad"
+                              : event.eventType === "IDENTITY_REGISTERED" ||
+                                event.eventType === "IDENTITY_UPDATED"
+                                ? "good"
+                                : event.success ? "good" : "bad"
+                          }
+                        >
+                          {event.eventType === "IDENTITY_REGISTERED"
+                            ? "Registered"
+                            : event.eventType === "IDENTITY_UPDATED"
+                              ? "Updated"
+                              : event.eventType === "IDENTITY_REVOKED"
+                                ? "Revoked"
+                                : event.success ? "Successful" : "Unsuccessful"}
+                        </StatusPill>
+                      </td>
+                      <td>{event.ipAddress || "—"}</td>
+                      <td>{formatDate(event.createdAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
-      )}
 
-  </main>
-
-  <footer>
-    <span>
-      AI-Enhanced Blockchain-Based
-      Self-Sovereign Identity
-    </span>
-
-    <span>
-      Kenya e-Government Security
-      Research Platform
-    </span>
-  </footer>
-
-</div>
-
-
-);
+        <footer className="page-footer">
+          <span>
+            <strong>ImaraID</strong> · AI-enhanced blockchain
+            identity security
+          </span>
+          <span>Local development environment</span>
+        </footer>
+      </main>
+    </div>
+  );
 }
 
 export default App;

@@ -54,4 +54,23 @@ if (!columnNames.includes("private_key")) {
     );
 }
 
+
+const eventColumns = db.prepare(
+    "PRAGMA table_info(authentication_events)"
+).all();
+const eventColumnNames = eventColumns.map(column => column.name);
+
+if (!eventColumnNames.includes("event_type")) {
+    db.exec("ALTER TABLE authentication_events ADD COLUMN event_type TEXT");
+}
+
+db.exec(`
+    UPDATE authentication_events
+    SET event_type = CASE
+        WHEN success = 1 THEN 'VERIFICATION_SUCCEEDED'
+        ELSE 'VERIFICATION_FAILED'
+    END
+    WHERE event_type IS NULL
+`);
+
 module.exports = db;
