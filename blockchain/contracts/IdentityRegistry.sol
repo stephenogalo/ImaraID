@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: MIT
+
+ // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 contract IdentityRegistry {
-
     struct Identity {
         bytes32 identityHash;
         string did;
@@ -11,17 +11,19 @@ contract IdentityRegistry {
         bool active;
     }
 
-    mapping(address => Identity) private identities;
+    // Each identity is indexed by its unique hash.
+    mapping(bytes32 => Identity) private identities;
 
     event IdentityRegistered(
-        address indexed owner,
+        address indexed registrar,
         bytes32 indexed identityHash,
         string did,
         uint256 createdAt
     );
 
     event IdentityDeactivated(
-        address indexed owner,
+        bytes32 indexed identityHash,
+        address indexed registrar,
         uint256 timestamp
     );
 
@@ -30,13 +32,15 @@ contract IdentityRegistry {
         string memory did,
         string memory publicKey
     ) public {
-
+        require(identityHash != bytes32(0), "Invalid identity hash");
+        require(bytes(did).length > 0, "DID is required");
+        require(bytes(publicKey).length > 0, "Public key is required");
         require(
-            identities[msg.sender].createdAt == 0,
+            identities[identityHash].createdAt == 0,
             "Identity already registered"
         );
 
-        identities[msg.sender] = Identity({
+        identities[identityHash] = Identity({
             identityHash: identityHash,
             did: did,
             publicKey: publicKey,
@@ -53,24 +57,21 @@ contract IdentityRegistry {
     }
 
     function getIdentity(
-        address owner
+        bytes32 identityHash
     )
         public
         view
         returns (
-            bytes32 identityHash,
+            bytes32 storedHash,
             string memory did,
             string memory publicKey,
             uint256 createdAt,
             bool active
         )
     {
-        Identity memory identity = identities[owner];
+        Identity storage identity = identities[identityHash];
 
-        require(
-            identity.createdAt != 0,
-            "Identity not found"
-        );
+        require(identity.createdAt != 0, "Identity not found");
 
         return (
             identity.identityHash,
@@ -81,30 +82,41 @@ contract IdentityRegistry {
         );
     }
 
-    function deactivateIdentity() public {
+    function verifyIdentity(
+        bytes32 expectedHash
+    ) public view returns (bool) {
+        Identity storage identity = identities[expectedHash];
 
-        require(
-            identities[msg.sender].createdAt != 0,
-            "Identity not found"
+        return (
+            identity.createdAt != 0 &&
+            identity.active &&
+            identity.identityHash == expectedHash
         );
+    }
 
-        require(
-            identities[msg.sender].active,
-            "Identity already inactive"
-        );
+    function deactivateIdentity(
+        bytes32 identityHash
+    ) public {
+        Identity storage identity = identities[identityHash];
 
-        identities[msg.sender].active = false;
+        require(identity.createdAt != 0, "Identity not found");
+        require(identity.active, "Identity already inactive");
+
+        identity.active = false;
 
         emit IdentityDeactivated(
+            identityHash,
             msg.sender,
             block.timestamp
         );
     }
 
     function isIdentityActive(
-        address owner
+        bytes32 identityHash
     ) public view returns (bool) {
-
-        return identities[owner].active;
+        return (
+            identities[identityHash].createdAt != 0 &&
+            identities[identityHash].active
+        );
     }
 }

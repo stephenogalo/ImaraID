@@ -1,151 +1,108 @@
 import os
 import sqlite3
-import numpy as np
+
 import joblib
-
+import numpy as np
 from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-DATABASE_PATH = os.path.join(
-    BASE_DIR,
-    "config",
-    "identity.db"
-)
-
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "ai",
-    "identity_model.joblib"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "identity_model.joblib")
+DB_PATH = os.path.abspath(
+    os.path.join(BASE_DIR, "../config/identity.db")
 )
 
 
-def get_real_identity_activity():
-    """
-    Read authentication activity from the existing
-    SQLite database and convert it into training features.
-    """
+def load_historical_activity():
+    rows = []
 
-    if not os.path.exists(DATABASE_PATH):
-        return np.empty((0, 4))
+    if not os.path.exists(DB_PATH):
+        print("Database not found; using baseline training data.")
+        return rows
 
-    connection = sqlite3.connect(DATABASE_PATH)
+    try:
+        connection = sqlite3.connect(DB_PATH)
 
-    cursor = connection.cursor()
+        query = """
+            SELECT
+                COUNT(*) AS attempts,
+                SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+                COUNT(DISTINCT ip_address) AS unique_ips
+            FROM authentication_events
+            WHERE identity_id IS NOT NULL
+            GROUP BY identity_id
+        """
 
-    cursor.execute("""
-        SELECT
-            id,
-            (
-                SELECT COUNT(*)
-                FROM authentication_events ae
-                WHERE ae.identity_id = i.id
-            ) AS verification_attempts,
-            (
-                SELECT COUNT(*)
-                FROM authentication_events ae
-                WHERE ae.identity_id = i.id
-                AND ae.success = 0
-            ) AS failed_verifications,
-            (
-                SELECT COUNT(DISTINCT ae.ip_address)
-                FROM authentication_events ae
-                WHERE ae.identity_id = i.id
-                AND ae.ip_address IS NOT NULL
-            ) AS unique_ips
-        FROM identities i
-    """)
+        for attempts, failures, unique_ips in connection.execute(query):
+            failures = int(failures or 0)
+            unique_ips = int(unique_ips or 1)
 
-    rows = cursor.fetchall()
+            rows.append([
+                failures,
+                max(0, unique_ips - 1)
+            ])
 
-    connection.close()
+        connection.close()
 
-    if not rows:
-        return np.empty((0, 4))
+    except sqlite3.Error as error:
+        print(f"Historical activity could not be loaded: {error}")
 
-    features = []
-
-    for row in rows:
-
-        identity_id = row[0]
-        verification_attempts = row[1]
-        failed_verifications = row[2]
-        unique_ips = row[3]
-
-        # One current registration per identity.
-        registrations = 1
-
-        features.append([
-            verification_attempts,
-            failed_verifications,
-            registrations,
-            unique_ips
-        ])
-
-    return np.array(features, dtype=float)
+    return rows
 
 
-def get_baseline_training_data():
-    """
-    Baseline normal activity used when the system does not
-    yet have enough real authentication history.
-    """
+def main():
+    # Representative baseline patterns:
+    # most normal activity has few failures and limited IP diversity.
+    normal_patterns = [
+        [0, 0]
+    ] * 60 + [
+        [0, 1]
+    ] * 15 + [
+        [0, 2]
+    ] * 5 + [
+        [1, 0]
+    ] * 8 + [
+        [1, 1]
+    ] * 4 + [
+        [2, 0]
+    ] * 3
 
-    return np.array([
-        [1, 0, 1, 1],
-        [2, 0, 1, 1],
-        [3, 0, 2, 1],
-        [2, 0, 2, 1],
-        [4, 0, 2, 1],
-        [3, 1, 2, 1],
-        [5, 0, 3, 1],
-        [4, 1, 3, 1],
-        [2, 0, 1, 1],
-        [3, 0, 2, 1],
-        [5, 1, 3, 1],
-        [4, 0, 2, 1],
-    ], dtype=float)
+    # Representative anomalous patterns for training the outlier detector.
+    anomaly_patterns = [
+        [3, 0], [4, 0], [5, 0], [6, 0],
+        [3, 1], [4, 1], [5, 2], [6, 2],
+        [2, 4], [1, 5], [4, 4], [8, 1],
+        [10, 0], [7, 3], [9, 2]
+    ]
 
+    historical_patterns = load_historical_activity()
 
-def train_model():
-
-    baseline = get_baseline_training_data()
-
-    real_activity = get_real_identity_activity()
-
-    if len(real_activity) > 0:
-        training_data = np.vstack([
-            baseline,
-            real_activity
-        ])
-
-        print(
-            f"Using {len(real_activity)} real identity activity records."
-        )
-    else:
-        training_data = baseline
-
-        print(
-            "No real identity activity found. "
-            "Using baseline training data."
-        )
-
-    model = IsolationForest(
-        n_estimators=200,
-        contamination=0.10,
-        random_state=42
+    training_data = (
+        normal_patterns
+        + anomaly_patterns
+        + historical_patterns
     )
 
-    model.fit(training_data)
+    X = np.asarray(training_data, dtype=float)
 
+    model = Pipeline([
+        ("scaler", StandardScaler()),
+        ("detector", IsolationForest(
+            n_estimators=200,
+            contamination=0.10,
+            random_state=42
+        ))
+    ])
+
+    model.fit(X)
     joblib.dump(model, MODEL_PATH)
 
-    print("\nModel trained successfully.")
-    print("Training samples:", len(training_data))
-    print("Model saved to:")
-    print(MODEL_PATH)
+    print("AI model trained successfully.")
+    print(f"Training samples: {len(X)}")
+    print(f"Historical identity patterns: {len(historical_patterns)}")
+    print(f"Saved model: {MODEL_PATH}")
 
 
 if __name__ == "__main__":
-    train_model()
+    main()

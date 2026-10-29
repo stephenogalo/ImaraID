@@ -16,9 +16,10 @@ const createIdentity = (
             created_at,
             did,
             public_key,
-            private_key
+            private_key,
+            active
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
     `);
 
     const result = statement.run(
@@ -36,7 +37,8 @@ const createIdentity = (
         email,
         createdAt,
         did,
-        publicKey
+        publicKey,
+        active: 1
     };
 };
 
@@ -48,7 +50,8 @@ const getAllIdentities = () => {
             email,
             created_at AS createdAt,
             did,
-            public_key AS publicKey
+            public_key AS publicKey,
+            active
         FROM identities
         ORDER BY id DESC
     `).all();
@@ -63,7 +66,8 @@ const getIdentityByPublicKey = (publicKey) => {
             created_at AS createdAt,
             did,
             public_key AS publicKey,
-            private_key AS privateKey
+            private_key AS privateKey,
+            active
         FROM identities
         WHERE public_key = ?
         LIMIT 1
@@ -79,16 +83,39 @@ const getIdentityById = (id) => {
             created_at AS createdAt,
             did,
             public_key AS publicKey,
-            private_key AS privateKey
+            private_key AS privateKey,
+            active
         FROM identities
         WHERE id = ?
         LIMIT 1
     `).get(id);
 };
 
+const updateIdentity = (id, name, email) => {
+    const result = db.prepare(`
+        UPDATE identities
+        SET name = ?, email = ?
+        WHERE id = ? AND active = 1
+    `).run(name, email, id);
+
+    return result.changes > 0 ? getIdentityById(id) : null;
+};
+
+const setIdentityActive = (id, active) => {
+    const result = db.prepare(`
+        UPDATE identities
+        SET active = ?
+        WHERE id = ?
+    `).run(active ? 1 : 0, id);
+
+    return result.changes > 0 ? getIdentityById(id) : null;
+};
+
 module.exports = {
     createIdentity,
     getAllIdentities,
     getIdentityByPublicKey,
-    getIdentityById
+    getIdentityById,
+    updateIdentity,
+    setIdentityActive
 };

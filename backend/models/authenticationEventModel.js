@@ -71,6 +71,19 @@ const getIdentityAuthenticationEvents = (identityId, limit = 100) => {
     `).all(identityId, limit);
 };
 
+const getRecentFailedVerifications = (identityId, minutes = 15) => {
+    return db.prepare(`
+        SELECT COUNT(*) AS total
+        FROM authentication_events
+        WHERE identity_id = ?
+          AND event_type = 'VERIFICATION_FAILED'
+          AND created_at >= ?
+    `).get(
+        identityId,
+        new Date(Date.now() - minutes * 60 * 1000).toISOString()
+    ).total;
+};
+
 const getIdentityActivityStats = (identityId) => {
     const attemptsResult = db.prepare(`
         SELECT COUNT(*) AS total
@@ -100,7 +113,18 @@ const getIdentityActivityStats = (identityId) => {
           AND ip_address IS NOT NULL
     `).get(identityId);
 
+    const recentCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    const recentFailuresResult = db.prepare(`
+        SELECT COUNT(*) AS total
+        FROM authentication_events
+        WHERE identity_id = ?
+          AND event_type = 'VERIFICATION_FAILED'
+          AND created_at >= ?
+    `).get(identityId, recentCutoff);
+
     return {
+        recentFailedVerifications: recentFailuresResult.total,
         verificationAttempts: attemptsResult.total,
         failedVerifications: failedResult.total,
         uniqueIPs: uniqueIPsResult.total
@@ -111,5 +135,6 @@ module.exports = {
     createAuthenticationEvent,
     getAuthenticationEvents,
     getIdentityAuthenticationEvents,
-    getIdentityActivityStats
+    getIdentityActivityStats,
+    getRecentFailedVerifications
 };
